@@ -3,11 +3,120 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "sqlite3.h"
 #define FLAG_IMPLEMENTATION
 #include "../thirdparty/flag.h"
-
 #define NOB_IMPLEMENTATION
 #include "../thirdparty/nob.h"
+
+sqlite3 *open_db() {
+    sqlite3 *db = NULL;
+    const char *db_path = "/me/db/yt.db";
+    const char *home_path = getenv("HOME");
+    if (!home_path) {
+        fprintf(stderr, "ytd: HOME environment variable not set\n");
+        return NULL;
+    }
+    if (sqlite3_open(temp_sprintf("%s%s", home_path, db_path), &db) != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't open database: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+int get_latest_videos(int argc, char **argv, uint64_t latest)
+{
+    argc = flag_rest_argc();
+    argv = flag_rest_argv();
+
+    if (argc != 1) {
+        fprintf(stderr, "ytd: passed %d args; must only pass 1 arg", argc);
+        return 1;
+    }
+
+    Cmd cmd = {0};
+    Chain chain = {0};
+    if (!chain_begin(&chain)) return 1;
+    {
+        cmd_append(&cmd, "yt-dlp");
+        cmd_append(&cmd, "--playlist-end", temp_sprintf("%ld", latest));
+        cmd_append(&cmd, "--flat-playlist");
+        cmd_append(&cmd, "--extractor-args", "youtubetab:approximate_date");
+        cmd_append(&cmd, "--ignore-errors");
+        cmd_append(&cmd, "-j", temp_sprintf("https://youtube.com/%s", argv[0]));
+        if (!chain_cmd(&chain, &cmd)) return 1;
+
+        cmd_append(&cmd, "jq");
+        cmd_append(&cmd, "-r", "select(.url | contains(\"/shorts/\") | not) | \"[\\(.upload_date)] [\\(.id)] \\(.title)\"");
+        if (!chain_cmd(&chain, &cmd)) return 1;
+    }
+    if (!chain_end(&chain)) return 1;
+    return 0;
+}
+
+int download_video(const char *download)
+{
+    Cmd cmd = {0};
+    cmd_append(&cmd, "yt-dlp");
+    cmd_append(&cmd, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
+    cmd_append(&cmd, "--merge-output-format", "mp4");
+    cmd_append(&cmd, "--embed-thumbnail");
+    cmd_append(&cmd, "--no-mtime");
+    cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
+    cmd_append(&cmd, temp_sprintf("https://youtu.be/%s", download));
+    if (!cmd_run(&cmd)) return 1;
+    return 0;
+}
+
+bool apply_migrations(sqlite3 *db)
+{
+    const char *migrations[] = {
+        // 0001
+        "CREATE TABLE IF NOT EXISTS video ("
+        "    id            INTEGER PRIMARY KEY,"
+        "    video_id      TEXT NOT NULL,"
+        "    downloaded_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        ");",
+    };
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't prepare user_version: %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr, "ytd: can't read user_version: %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+
+    int current_version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    for (int i = current_version; i < (int)ARRAY_LEN(migrations); i++) {
+        char *zErrMsg = NULL;
+        rc = sqlite3_exec(db, migrations[i], NULL, 0, &zErrMsg);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "ytd: SQL error when applying migration %04d: %s\n", i + 1, zErrMsg);
+            sqlite3_free(zErrMsg);
+            return false;
+        }
+
+        char *sql = sqlite3_mprintf("PRAGMA user_version = %d", i + 1);
+        rc = sqlite3_exec(db, sql, NULL, 0, &zErrMsg);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "ytd: SQL error when setting user_version %d: %s\n", i + 1, zErrMsg);
+            sqlite3_free(zErrMsg);
+            return false;
+        }
+    }
+
+    return true;
+}
 
 void usage(FILE *stream)
 {
@@ -37,47 +146,26 @@ int main(int argc, char **argv)
 
     if (!*debug) nob_set_log_handler(&nob_null_log_handler);
 
+    sqlite3 *db = open_db();
+    if (!db) return 1;
+
+    if (!apply_migrations(db)) {
+        sqlite3_close(db);
+        return 1;
+    }
+
     if (*latest) {
-        argc = flag_rest_argc();
-        argv = flag_rest_argv();
-
-        if (argc != 1) {
-            fprintf(stderr, "ytd: passed %d args; must only pass 1 arg", argc);
-            return 1;
-        }
-
-        Cmd cmd = {0};
-        Chain chain = {0};
-        if (!chain_begin(&chain)) return 1;
-        {
-            cmd_append(&cmd, "yt-dlp");
-            cmd_append(&cmd, "--playlist-end", temp_sprintf("%" PRIu64, *latest));
-            cmd_append(&cmd, "--flat-playlist");
-            cmd_append(&cmd, "--extractor-args", "youtubetab:approximate_date");
-            cmd_append(&cmd, "--ignore-errors");
-            cmd_append(&cmd, "-j", temp_sprintf("https://youtube.com/%s", argv[0]));
-            if (!chain_cmd(&chain, &cmd)) return 1;
-
-            cmd_append(&cmd, "jq");
-            cmd_append(&cmd, "-r", "select(.url | contains(\"/shorts/\") | not) | \"[\\(.upload_date)] [\\(.id)] \\(.title)\"");
-            if (!chain_cmd(&chain, &cmd)) return 1;
-        }
-        if (!chain_end(&chain)) return 1;
-        return 0;
+        int rc = get_latest_videos(argc, argv, *latest);
+        sqlite3_close(db);
+        return rc;
     }
 
     if (*download) {
-        Cmd cmd = {0};
-        cmd_append(&cmd, "yt-dlp");
-        cmd_append(&cmd, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
-        cmd_append(&cmd, "--merge-output-format", "mp4");
-        cmd_append(&cmd, "--embed-thumbnail");
-        cmd_append(&cmd, "--no-mtime");
-        cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
-        cmd_append(&cmd, temp_sprintf("https://youtu.be/%s", *download));
-        if (!cmd_run(&cmd)) return 1;
-        return 0;
+        int rc = download_video(*download);
+        sqlite3_close(db);
+        return rc;
     }
 
+    sqlite3_close(db);
     return 0;
 }
