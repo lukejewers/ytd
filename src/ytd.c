@@ -18,7 +18,9 @@ void usage(FILE *stream)
 
 int main(int argc, char **argv)
 {
+
     bool      *help     = flag_bool("h", false, "Print this help to stdout and exit with 0");
+    bool      *debug    = flag_bool("debug", false, "Print the debug logs");
     char     **download = flag_str("d", NULL, "Pass the video ID to download");
     uint64_t  *latest   = flag_uint64("l", 0, "Pass the number of latest videos for channel");
 
@@ -32,6 +34,8 @@ int main(int argc, char **argv)
         usage(stdout);
         return 0;
     }
+
+    if (!*debug) nob_set_log_handler(&nob_null_log_handler);
 
     if (*latest) {
         argc = flag_rest_argc();
