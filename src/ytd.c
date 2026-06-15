@@ -40,7 +40,7 @@ int get_latest_videos(int argc, char **argv, uint64_t latest)
     if (!chain_begin(&chain)) return 1;
     {
         cmd_append(&cmd, "yt-dlp");
-        cmd_append(&cmd, "--playlist-end", temp_sprintf("%ld", latest));
+        cmd_append(&cmd, "--playlist-end", temp_sprintf("%" PRIu64, latest));
         cmd_append(&cmd, "--flat-playlist");
         cmd_append(&cmd, "--extractor-args", "youtubetab:approximate_date");
         cmd_append(&cmd, "--ignore-errors");
