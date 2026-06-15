@@ -25,19 +25,19 @@ sqlite3 *open_db() {
     return db;
 }
 
-int get_latest_videos(int argc, char **argv, uint64_t latest)
+bool get_latest_videos(int argc, char **argv, uint64_t latest)
 {
     argc = flag_rest_argc();
     argv = flag_rest_argv();
 
     if (argc != 1) {
         fprintf(stderr, "ytd: passed %d args; must only pass 1 arg", argc);
-        return 1;
+        return false;
     }
 
     Cmd cmd = {0};
     Chain chain = {0};
-    if (!chain_begin(&chain)) return 1;
+    if (!chain_begin(&chain)) return false;
     {
         cmd_append(&cmd, "yt-dlp");
         cmd_append(&cmd, "--playlist-end", temp_sprintf("%" PRIu64, latest));
@@ -45,37 +45,37 @@ int get_latest_videos(int argc, char **argv, uint64_t latest)
         cmd_append(&cmd, "--extractor-args", "youtubetab:approximate_date");
         cmd_append(&cmd, "--ignore-errors");
         cmd_append(&cmd, "-j", temp_sprintf("https://youtube.com/%s", argv[0]));
-        if (!chain_cmd(&chain, &cmd)) return 1;
+        if (!chain_cmd(&chain, &cmd)) return false;
 
         cmd_append(&cmd, "jq");
         cmd_append(&cmd, "-r", "select(.url | contains(\"/shorts/\") | not) | \"[\\(.upload_date)] [\\(.id)] \\(.title)\"");
-        if (!chain_cmd(&chain, &cmd)) return 1;
+        if (!chain_cmd(&chain, &cmd)) return false;
     }
-    if (!chain_end(&chain)) return 1;
-    return 0;
+    if (!chain_end(&chain)) return false;
+    return true;
 }
 
-int download_video(sqlite3 *db, const char *download)
+bool download_video(sqlite3 *db, const char *download)
 {
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "select exists(select 1 from video where video_id = ?)", -1, &stmt, 0);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't prepare statement: %s\n", sqlite3_errmsg(db));
-        return 1;
+        return false;
     }
 
     rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
-        return 1;
+        return false;
     }
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_ROW) {
         fprintf(stderr, "ytd: can't read video_id: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
-        return 1;
+        return false;
     }
 
     int video_exists = sqlite3_column_int(stmt, 0);
@@ -83,7 +83,7 @@ int download_video(sqlite3 *db, const char *download)
 
     if (video_exists) {
         fprintf(stdout, "ytd: video with id %s already exists. Not downloading.\n", download);
-        return 0;
+        return true;
     }
 
     Cmd cmd = {0};
@@ -94,30 +94,30 @@ int download_video(sqlite3 *db, const char *download)
     cmd_append(&cmd, "--no-mtime");
     cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
     cmd_append(&cmd, temp_sprintf("https://youtu.be/%s", download));
-    if (!cmd_run(&cmd)) return 1;
+    if (!cmd_run(&cmd)) return false;
 
     rc = sqlite3_prepare_v2(db, "insert into video (video_id) values (?)", -1, &stmt, 0);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't prepare statement: %s\n", sqlite3_errmsg(db));
-        return 1;
+        return false;
     }
 
     rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
-        return 1;
+        return false;
     }
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         fprintf(stderr, "ytd: can't insert video_id into video: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
-        return 1;
+        return false;
     }
     sqlite3_finalize(stmt);
 
-    return 0;
+    return true;
 }
 
 bool apply_migrations(sqlite3 *db)
@@ -210,15 +210,15 @@ int main(int argc, char **argv)
     }
 
     if (*latest) {
-        int rc = get_latest_videos(argc, argv, *latest);
-        sqlite3_close(db);
-        return rc;
-    }
-
-    if (*download) {
-        int rc = download_video(db, *download);
-        sqlite3_close(db);
-        return rc;
+        if (!get_latest_videos(argc, argv, *latest)) {
+            sqlite3_close(db);
+            return 1;
+        }
+    } else if (*download) {
+        if (!download_video(db, *download)) {
+            sqlite3_close(db);
+            return 1;
+        }
     }
 
     sqlite3_close(db);
