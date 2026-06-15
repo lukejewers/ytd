@@ -144,6 +144,8 @@ bool apply_migrations(sqlite3 *db)
     sqlite3_finalize(stmt);
 
     for (int i = current_version; i < (int)ARRAY_LEN(migrations); i++) {
+        sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, NULL);
+
         char *zErrMsg = NULL;
         rc = sqlite3_exec(db, migrations[i], NULL, 0, &zErrMsg);
         if (rc != SQLITE_OK) {
@@ -160,6 +162,8 @@ bool apply_migrations(sqlite3 *db)
             sqlite3_free(zErrMsg);
             return false;
         }
+
+        sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
     }
 
     return true;
