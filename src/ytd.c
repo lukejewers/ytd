@@ -55,8 +55,35 @@ int get_latest_videos(int argc, char **argv, uint64_t latest)
     return 0;
 }
 
-int download_video(const char *download)
+int download_video(sqlite3 *db, const char *download)
 {
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, "select exists(select 1 from video where video_id = ?)", -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't prepare statement: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+
+    rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr, "ytd: can't read video_id: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+
+    int video_exists = sqlite3_column_int(stmt, 0);
+    sqlite3_reset(stmt);
+
+    if (video_exists) {
+        fprintf(stdout, "ytd: video with id %s already exists. Not downloading.\n", download);
+        return 0;
+    }
+
     Cmd cmd = {0};
     cmd_append(&cmd, "yt-dlp");
     cmd_append(&cmd, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
@@ -66,6 +93,26 @@ int download_video(const char *download)
     cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
     cmd_append(&cmd, temp_sprintf("https://youtu.be/%s", download));
     if (!cmd_run(&cmd)) return 1;
+
+    rc = sqlite3_prepare_v2(db, "insert into video (video_id) values (?)", -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't prepare statement: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+
+    rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "ytd: can't insert video_id into video: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+    sqlite3_finalize(stmt);
+
     return 0;
 }
 
@@ -161,7 +208,7 @@ int main(int argc, char **argv)
     }
 
     if (*download) {
-        int rc = download_video(*download);
+        int rc = download_video(db, *download);
         sqlite3_close(db);
         return rc;
     }
