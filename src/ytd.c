@@ -67,17 +67,19 @@ int download_video(sqlite3 *db, const char *download)
     rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
         return 1;
     }
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_ROW) {
         fprintf(stderr, "ytd: can't read video_id: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
         return 1;
     }
 
     int video_exists = sqlite3_column_int(stmt, 0);
-    sqlite3_reset(stmt);
+    sqlite3_finalize(stmt);
 
     if (video_exists) {
         fprintf(stdout, "ytd: video with id %s already exists. Not downloading.\n", download);
@@ -103,12 +105,14 @@ int download_video(sqlite3 *db, const char *download)
     rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
         return 1;
     }
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         fprintf(stderr, "ytd: can't insert video_id into video: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
         return 1;
     }
     sqlite3_finalize(stmt);
