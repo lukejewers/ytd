@@ -25,8 +25,13 @@ sqlite3 *open_db() {
     return db;
 }
 
-bool get_latest_videos(int argc, char **argv, uint64_t latest)
+bool get_latest_videos(int argc, char **argv, uint64_t latest, const char *platform)
 {
+    if (platform && strcmp(platform, "youtube") != 0) {
+        fprintf(stderr, "ytd: %s is not a valid option for latest videos\n", platform);
+        return false;
+    }
+
     argc = flag_rest_argc();
     argv = flag_rest_argv();
 
@@ -55,7 +60,7 @@ bool get_latest_videos(int argc, char **argv, uint64_t latest)
     return true;
 }
 
-bool download_video(sqlite3 *db, const char *download)
+bool download_video(sqlite3 *db, const char *download, const char *platform)
 {
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "select exists(select 1 from video where video_id = ?)", -1, &stmt, 0);
@@ -86,6 +91,16 @@ bool download_video(sqlite3 *db, const char *download)
         return true;
     }
 
+    const char *url;
+    if (strcmp(platform, "youtube") == 0) {
+        url = "https://youtu.be";
+    } else if (strcmp(platform, "twitch") == 0) {
+        url = "https://www.twitch.tv/videos";
+    } else {
+        fprintf(stdout, "ytd: platform '%s' video download not supported.\n", platform);
+        return false;
+    }
+
     Cmd cmd = {0};
     cmd_append(&cmd, "yt-dlp");
     cmd_append(&cmd, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
@@ -93,16 +108,23 @@ bool download_video(sqlite3 *db, const char *download)
     cmd_append(&cmd, "--embed-thumbnail");
     cmd_append(&cmd, "--no-mtime");
     cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
-    cmd_append(&cmd, temp_sprintf("https://youtu.be/%s", download));
+    cmd_append(&cmd, temp_sprintf("%s/%s", url, download));
     if (!cmd_run(&cmd)) return false;
 
-    rc = sqlite3_prepare_v2(db, "insert into video (video_id) values (?)", -1, &stmt, 0);
+    rc = sqlite3_prepare_v2(db, "insert into video (video_id,platform) values (?,?)", -1, &stmt, 0);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't prepare statement: %s\n", sqlite3_errmsg(db));
         return false;
     }
 
     rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    rc = sqlite3_bind_text(stmt, 2, platform, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
@@ -129,6 +151,8 @@ bool apply_migrations(sqlite3 *db)
         "    video_id      TEXT NOT NULL,"
         "    downloaded_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
         ");",
+        // 0002
+        "ALTER TABLE video ADD COLUMN platform TEXT;"
     };
 
     sqlite3_stmt *stmt = NULL;
@@ -185,6 +209,7 @@ int main(int argc, char **argv)
 
     bool      *help     = flag_bool("h", false, "Print this help to stdout and exit with 0");
     bool      *debug    = flag_bool("debug", false, "Print the debug logs");
+    char     **platform = flag_str("p", "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
     char     **download = flag_str("d", NULL, "Pass the video ID to download");
     uint64_t  *latest   = flag_uint64("l", 0, "Pass the number of latest videos for channel");
 
@@ -210,12 +235,12 @@ int main(int argc, char **argv)
     }
 
     if (*latest) {
-        if (!get_latest_videos(argc, argv, *latest)) {
+        if (!get_latest_videos(argc, argv, *latest, *platform)) {
             sqlite3_close(db);
             return 1;
         }
     } else if (*download) {
-        if (!download_video(db, *download)) {
+        if (!download_video(db, *download, *platform)) {
             sqlite3_close(db);
             return 1;
         }
