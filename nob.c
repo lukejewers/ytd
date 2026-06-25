@@ -18,5 +18,15 @@ int main(int argc, char **argv)
     cmd_append(&cmd, "-o", BUILD_FOLDER"ytd", SRC_FOLDER"ytd.c");
 
     if (!cmd_run(&cmd)) return 1;
+
+    shift(argv, argc); // program name
+    if (argc == 1 && strcmp(argv[0], "-install") == 0) {
+        Cmd cmd = {0};
+        const char *home = getenv("HOME");
+        assert(home);
+        cmd_append(&cmd, "cp", BUILD_FOLDER"ytd", temp_sprintf("%s/%s", home, ".local/bin"));
+        if (!cmd_run(&cmd)) return 1;
+    }
+
     return 0;
 }
