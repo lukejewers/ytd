@@ -25,6 +25,16 @@ sqlite3 *open_db() {
     return db;
 }
 
+const char *get_url_for_platform(const char *platform)
+{
+    if (strcmp(platform, "youtube") == 0) {
+        return "https://youtu.be";
+    } else if (strcmp(platform, "twitch") == 0) {
+        return "https://www.twitch.tv/videos";
+    }
+    return NULL;
+}
+
 bool get_latest_videos(int argc, char **argv, uint64_t latest, const char *platform)
 {
     if (platform && strcmp(platform, "youtube") != 0) {
@@ -60,6 +70,19 @@ bool get_latest_videos(int argc, char **argv, uint64_t latest, const char *platf
     return true;
 }
 
+bool open_video(const char *open, const char *platform)
+{
+    Cmd cmd = {0};
+    const char *url = get_url_for_platform(platform);
+    if (!url) {
+        fprintf(stderr, "ytd: platform %s not supported\n", platform);
+        return false;
+    }
+    cmd_append(&cmd, "firefox", temp_sprintf("%s/%s", url, open));
+    if(!cmd_run(&cmd)) return false;
+    return true;
+}
+
 bool download_video(sqlite3 *db, const char *download, const char *platform)
 {
     sqlite3_stmt *stmt;
@@ -91,13 +114,9 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
         return true;
     }
 
-    const char *url;
-    if (strcmp(platform, "youtube") == 0) {
-        url = "https://youtu.be";
-    } else if (strcmp(platform, "twitch") == 0) {
-        url = "https://www.twitch.tv/videos";
-    } else {
-        fprintf(stdout, "ytd: platform '%s' video download not supported.\n", platform);
+    const char *url = get_url_for_platform(platform);
+    if (!url) {
+        fprintf(stderr, "ytd: platform %s not supported\n", platform);
         return false;
     }
 
@@ -211,6 +230,7 @@ int main(int argc, char **argv)
     bool      *debug    = flag_bool("debug", false, "Print the debug logs");
     char     **platform = flag_str("p", "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
     char     **download = flag_str("d", NULL, "Pass the video ID to download");
+    char     **open     = flag_str("o", NULL, "Pass the video ID to open");
     uint64_t  *latest   = flag_uint64("l", 0, "Pass the number of latest videos for channel");
 
     if (!flag_parse(argc, argv)) {
@@ -236,6 +256,11 @@ int main(int argc, char **argv)
 
     if (*latest) {
         if (!get_latest_videos(argc, argv, *latest, *platform)) {
+            sqlite3_close(db);
+            return 1;
+        }
+    } else if (*open) {
+        if (!open_video(*open, *platform)) {
             sqlite3_close(db);
             return 1;
         }
