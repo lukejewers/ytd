@@ -19,7 +19,18 @@ int main(int argc, char **argv)
 
     if (!cmd_run(&cmd)) return 1;
 
-    shift(argv, argc); // program name
+    shift(argv, argc); // shift program name
+
+    if (argc > 0 && strcmp(argv[0], "-run") == 0) {
+        shift(argv, argc); // shift -run flag
+        Cmd cmd = {0};
+        cmd_append(&cmd, BUILD_FOLDER"ytd");
+        for (int i = 0; i < argc; ++i) {
+            cmd_append(&cmd, argv[i]);
+        }
+        if (!cmd_run(&cmd)) return 1;
+    }
+
     if (argc == 1 && strcmp(argv[0], "-install") == 0) {
         Cmd cmd = {0};
         const char *home = getenv("HOME");
