@@ -9,7 +9,8 @@
 #define NOB_IMPLEMENTATION
 #include "../thirdparty/nob.h"
 
-sqlite3 *open_db() {
+sqlite3 *open_db()
+{
     sqlite3 *db = NULL;
     const char *db_path = "/me/db/yt.db";
     const char *home_path = getenv("HOME");

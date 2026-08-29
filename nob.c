@@ -1,8 +1,6 @@
 #define NOB_IMPLEMENTATION
 #include "thirdparty/nob.h"
 
-#include "sqlite3.h"
-
 #define BUILD_FOLDER      "build/"
 #define SRC_FOLDER        "src/"
 
