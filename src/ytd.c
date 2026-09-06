@@ -121,6 +121,11 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
         return false;
     }
 
+    char tmp_filename[] = "/tmp/outputXXXXXX";
+    int fd = mkstemp(tmp_filename);
+    const char delimiter[] = "__delimiter__";
+    size_t delimiter_len = strlen(delimiter);
+
     Cmd cmd = {0};
     cmd_append(&cmd, "yt-dlp");
     cmd_append(&cmd, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
@@ -129,17 +134,48 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
     cmd_append(&cmd, "--no-mtime");
     cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
     cmd_append(&cmd, temp_sprintf("%s/%s", url, download));
+    cmd_append(&cmd, "--print-to-file", temp_sprintf("%%(uploader_id)s%s%%(title)s", delimiter), tmp_filename);
     if (!cmd_run(&cmd)) return false;
 
-    rc = sqlite3_prepare_v2(db, "insert into video (video_id,platform) values (?,?)", -1, &stmt, 0);
+    char str[4096];
+    char c;
+    size_t idx = 0;
+    lseek(fd, 0, SEEK_SET);
+    while (idx < sizeof(str) - 1 && read(fd, &c, 1) > 0) str[idx++] = c;
+    str[idx] = '\0';
+
+    char *uploader_id;
+    char *title;
+    const char *p = strstr(str, delimiter);
+    if (p) {
+        size_t before = p - str;
+        uploader_id = strndup(str, before);
+        size_t title_len = idx - before - delimiter_len;
+        if (title_len > 0 && str[idx-1] == '\n') title_len--;
+        title = strndup(p + delimiter_len, title_len);
+    } else {
+        fprintf(stderr, "ytd: can't get video metadata\n");
+        close(fd);
+        delete_file(tmp_filename);
+        return false;
+    }
+
+    close(fd);
+    delete_file(tmp_filename);
+
+    rc = sqlite3_prepare_v2(db, "insert into video (video_id,platform,title,uploader_id) values (?,?,?,?)", -1, &stmt, 0);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't prepare statement: %s\n", sqlite3_errmsg(db));
+        free(uploader_id);
+        free(title);
         return false;
     }
 
     rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        free(uploader_id);
+        free(title);
         sqlite3_finalize(stmt);
         return false;
     }
@@ -147,6 +183,26 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
     rc = sqlite3_bind_text(stmt, 2, platform, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        free(uploader_id);
+        free(title);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    rc = sqlite3_bind_text(stmt, 3, title, -1, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        free(uploader_id);
+        free(title);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    rc = sqlite3_bind_text(stmt, 4, uploader_id, -1, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
+        free(uploader_id);
+        free(title);
         sqlite3_finalize(stmt);
         return false;
     }
@@ -154,9 +210,14 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         fprintf(stderr, "ytd: can't insert video_id into video: %s\n", sqlite3_errmsg(db));
+        free(uploader_id);
+        free(title);
         sqlite3_finalize(stmt);
         return false;
     }
+
+    free(uploader_id);
+    free(title);
     sqlite3_finalize(stmt);
 
     return true;
@@ -172,7 +233,12 @@ bool apply_migrations(sqlite3 *db)
         "    downloaded_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
         ");",
         // 0002
-        "ALTER TABLE video ADD COLUMN platform TEXT;"
+        "ALTER TABLE video ADD COLUMN platform TEXT;",
+        // 0003
+        "ALTER TABLE video ADD COLUMN title TEXT; "
+        "ALTER TABLE video ADD COLUMN uploader_id TEXT;",
+        // 0004
+        "CREATE UNIQUE INDEX video_id_platform_uniq ON video(video_id,platform);"
     };
 
     sqlite3_stmt *stmt = NULL;
@@ -226,7 +292,6 @@ void usage(FILE *stream)
 
 int main(int argc, char **argv)
 {
-
     bool      *help     = flag_bool("h", false, "Print this help to stdout and exit with 0");
     bool      *debug    = flag_bool("debug", false, "Print the debug logs");
     char     **platform = flag_str("p", "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
