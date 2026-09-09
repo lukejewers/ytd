@@ -84,7 +84,7 @@ bool open_video(const char *open, const char *platform)
     return true;
 }
 
-bool download_video(sqlite3 *db, const char *download, const char *platform)
+bool download_video(sqlite3 *db, const char *video_id, const char *platform)
 {
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "select exists(select 1 from video where video_id = ?)", -1, &stmt, 0);
@@ -93,7 +93,7 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
         return false;
     }
 
-    rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
+    rc = sqlite3_bind_text(stmt, 1, video_id, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
@@ -111,8 +111,7 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
     sqlite3_finalize(stmt);
 
     if (video_exists) {
-        fprintf(stdout, "ytd: video with id %s already exists. Not downloading.\n", download);
-        return true;
+        fprintf(stdout, "ytd: video with id %s already exists. Downloading video again...\n", video_id);
     }
 
     const char *url = get_url_for_platform(platform);
@@ -133,7 +132,7 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
     cmd_append(&cmd, "--embed-thumbnail");
     cmd_append(&cmd, "--no-mtime");
     cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
-    cmd_append(&cmd, temp_sprintf("%s/%s", url, download));
+    cmd_append(&cmd, temp_sprintf("%s/%s", url, video_id));
     cmd_append(&cmd, "--print-to-file", temp_sprintf("%%(uploader_id)s%s%%(title)s", delimiter), tmp_filename);
     if (!cmd_run(&cmd)) return false;
 
@@ -171,7 +170,7 @@ bool download_video(sqlite3 *db, const char *download, const char *platform)
         return false;
     }
 
-    rc = sqlite3_bind_text(stmt, 1, download, -1, NULL);
+    rc = sqlite3_bind_text(stmt, 1, video_id, -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ytd: can't bind to statement: %s\n", sqlite3_errmsg(db));
         free(uploader_id);
@@ -236,9 +235,7 @@ bool apply_migrations(sqlite3 *db)
         "ALTER TABLE video ADD COLUMN platform TEXT;",
         // 0003
         "ALTER TABLE video ADD COLUMN title TEXT; "
-        "ALTER TABLE video ADD COLUMN uploader_id TEXT;",
-        // 0004
-        "CREATE UNIQUE INDEX video_id_platform_uniq ON video(video_id,platform);"
+        "ALTER TABLE video ADD COLUMN uploader_id TEXT;"
     };
 
     sqlite3_stmt *stmt = NULL;
@@ -292,12 +289,12 @@ void usage(FILE *stream)
 
 int main(int argc, char **argv)
 {
-    bool      *help     = flag_bool("h", false, "Print this help to stdout and exit with 0");
-    bool      *debug    = flag_bool("debug", false, "Print the debug logs");
-    char     **platform = flag_str("p", "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
-    char     **download = flag_str("d", NULL, "Pass the video ID to download");
-    char     **open     = flag_str("o", NULL, "Pass the video ID to open");
-    uint64_t  *latest   = flag_uint64("l", 0, "Pass the number of latest videos for channel");
+    bool      *help           = flag_bool("h", false, "Print this help to stdout and exit with 0");
+    bool      *debug          = flag_bool("debug", false, "Print the debug logs");
+    char     **platform       = flag_str("p", "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
+    char     **download       = flag_str("d", NULL, "Pass the video ID to download");
+    char     **open           = flag_str("o", NULL, "Pass the video ID to open");
+    uint64_t  *latest         = flag_uint64("l", 0, "Pass the number of latest videos for channel");
 
     if (!flag_parse(argc, argv)) {
         usage(stderr);
