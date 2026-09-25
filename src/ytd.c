@@ -80,7 +80,7 @@ bool open_video(const char *open, const char *platform)
         return false;
     }
     cmd_append(&cmd, "firefox", temp_sprintf("%s/%s", url, open));
-    if(!cmd_run(&cmd)) return false;
+    if (!cmd_run(&cmd)) return false;
     return true;
 }
 
@@ -234,7 +234,8 @@ bool apply_migrations(sqlite3 *db)
         // 0002
         "ALTER TABLE video ADD COLUMN platform TEXT;",
         // 0003
-        "ALTER TABLE video ADD COLUMN title TEXT; "
+        "ALTER TABLE video ADD COLUMN title TEXT;",
+        // 0004
         "ALTER TABLE video ADD COLUMN uploader_id TEXT;"
     };
 
