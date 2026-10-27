@@ -290,12 +290,13 @@ void usage(FILE *stream)
 
 int main(int argc, char **argv)
 {
-    bool      *help           = flag_bool("h", false, "Print this help to stdout and exit with 0");
-    bool      *debug          = flag_bool("debug", false, "Print the debug logs");
-    char     **platform       = flag_str("p", "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
-    char     **download       = flag_str("d", NULL, "Pass the video ID to download");
-    char     **open           = flag_str("o", NULL, "Pass the video ID to open");
-    uint64_t  *latest         = flag_uint64("l", 0, "Pass the number of latest videos for channel");
+    bool      *help           = flag_bool  ("h",     false,     "Print this help to stdout and exit with 0");
+    bool      *debug          = flag_bool  ("debug", false,     "Print the debug logs");
+    char     **platform       = flag_str   ("p",     "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
+    char     **download       = flag_str   ("d",     NULL,      "Pass the video ID to download");
+    Flag_List *download_list  = flag_list  ("dl",               "Pass the list of video IDs to download");
+    char     **open           = flag_str   ("o",     NULL,      "Pass the video ID to open");
+    uint64_t  *latest         = flag_uint64("l",     0,         "Pass the number of latest videos for channel");
 
     if (!flag_parse(argc, argv)) {
         usage(stderr);
@@ -332,6 +333,14 @@ int main(int argc, char **argv)
         if (!download_video(db, *download, *platform)) {
             sqlite3_close(db);
             return 1;
+        }
+    } else if (download_list) {
+        for (size_t i = 0; i < download_list->count; i++) {
+            const char *video_id = download_list->items[i];
+            if (!download_video(db, video_id, *platform)) {
+                sqlite3_close(db);
+                return 1;
+            }
         }
     }
 
