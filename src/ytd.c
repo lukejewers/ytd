@@ -229,8 +229,8 @@ bool apply_migrations(sqlite3 *db)
         "CREATE TABLE IF NOT EXISTS video ("
         "    id            INTEGER PRIMARY KEY,"
         "    video_id      TEXT NOT NULL,"
-        "    downloaded_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-        ");",
+        "    downloaded_on TEXT DEFAULT CURRENT_TIMESTAMP"
+        ") STRICT;",
         // 0002
         "ALTER TABLE video ADD COLUMN platform TEXT;",
         // 0003
