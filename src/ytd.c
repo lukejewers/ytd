@@ -64,7 +64,10 @@ bool get_latest_videos(int argc, char **argv, uint64_t latest, const char *platf
         if (!chain_cmd(&chain, &cmd)) return false;
 
         cmd_append(&cmd, "jq");
-        cmd_append(&cmd, "-r", "select(.url | contains(\"/shorts/\") | not) | \"[\\(.upload_date)] [\\(.id)] \\(.title)\"");
+        cmd_append(&cmd, "-r",
+                   "select(.url | contains(\"/shorts/\") | not) "
+                   "| select((.live_status // \"not_live\") == \"not_live\") "
+                   "| \"[\\(.upload_date)] [\\(.id)] \\(.title)\"");
         if (!chain_cmd(&chain, &cmd)) return false;
     }
     if (!chain_end(&chain)) return false;

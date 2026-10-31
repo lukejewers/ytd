@@ -8,7 +8,3 @@
 $ gcc -o nob nob.c
 $ ./nob && build/ytd -h
 ```
-
-## TODO
-
-- [ ] Exclude livestreams from latest videos
