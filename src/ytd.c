@@ -87,7 +87,7 @@ bool open_video(const char *open, const char *platform)
     return true;
 }
 
-bool download_video(sqlite3 *db, const char *video_id, const char *platform)
+bool download_video(sqlite3 *db, const char *video_id, const char *platform, bool audio_only)
 {
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "select exists(select 1 from video where video_id = ?)", -1, &stmt, 0);
@@ -130,8 +130,13 @@ bool download_video(sqlite3 *db, const char *video_id, const char *platform)
 
     Cmd cmd = {0};
     cmd_append(&cmd, "yt-dlp");
-    cmd_append(&cmd, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
-    cmd_append(&cmd, "--merge-output-format", "mp4");
+    if (audio_only) {
+        cmd_append(&cmd, "-f", "bestaudio/best");
+        cmd_append(&cmd, "-x", "--audio-format", "mp3", "--audio-quality", "0");
+    } else {
+        cmd_append(&cmd, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
+        cmd_append(&cmd, "--merge-output-format", "mp4");
+    }
     cmd_append(&cmd, "--embed-thumbnail");
     cmd_append(&cmd, "--no-mtime");
     cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
@@ -165,7 +170,7 @@ bool download_video(sqlite3 *db, const char *video_id, const char *platform)
     close(fd);
     delete_file(tmp_filename);
 
-    rc = sqlite3_prepare_v2(db, "insert into video (video_id,platform,title,uploader_id) values (?,?,?,?)", -1, &stmt, 0);
+    rc = sqlite3_prepare_v2(db, "insert into video (video_id,platform,title,uploader_id,media_type) values (?,?,?,?,?)", -1, &stmt, 0);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "[ytd] can't prepare statement: %s\n", sqlite3_errmsg(db));
         free(uploader_id);
@@ -209,6 +214,16 @@ bool download_video(sqlite3 *db, const char *video_id, const char *platform)
         return false;
     }
 
+    const char *media_type = audio_only ? "audio" : "video";
+    rc = sqlite3_bind_text(stmt, 5, media_type, -1, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "[ytd] can't bind to statement: %s\n", sqlite3_errmsg(db));
+        free(uploader_id);
+        free(title);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         fprintf(stderr, "[ytd] can't insert video_id into video: %s\n", sqlite3_errmsg(db));
@@ -239,7 +254,9 @@ bool apply_migrations(sqlite3 *db)
         // 0003
         "ALTER TABLE video ADD COLUMN title TEXT;",
         // 0004
-        "ALTER TABLE video ADD COLUMN uploader_id TEXT;"
+        "ALTER TABLE video ADD COLUMN uploader_id TEXT;",
+        // 0005
+        "ALTER TABLE video ADD COLUMN media_type TEXT;"
     };
 
     sqlite3_stmt *stmt = NULL;
@@ -297,6 +314,7 @@ int main(int argc, char **argv)
     bool      *debug          = flag_bool  ("debug", false,     "Print the debug logs");
     char     **platform       = flag_str   ("p",     "youtube", "Pass the platform (youtube or twitch). Get latest only supports youtube.");
     char     **download       = flag_str   ("d",     NULL,      "Pass the video ID to download");
+    char     **audio          = flag_str   ("a",     NULL,      "Pass the video ID to download the audio");
     Flag_List *download_list  = flag_list  ("dl",               "Pass the list of video IDs to download");
     char     **open           = flag_str   ("o",     NULL,      "Pass the video ID to open");
     uint64_t  *latest         = flag_uint64("l",     0,         "Pass the number of latest videos for channel");
@@ -333,14 +351,22 @@ int main(int argc, char **argv)
             return 1;
         }
     } else if (*download) {
-        if (!download_video(db, *download, *platform)) {
+        bool audio_only = false;
+        if (!download_video(db, *download, *platform, audio_only)) {
+            sqlite3_close(db);
+            return 1;
+        }
+    } else if (*audio) {
+        bool audio_only = true;
+        if (!download_video(db, *audio, *platform, audio_only)) {
             sqlite3_close(db);
             return 1;
         }
     } else if (download_list) {
+        bool audio_only = false;
         for (size_t i = 0; i < download_list->count; i++) {
             const char *video_id = download_list->items[i];
-            if (!download_video(db, video_id, *platform)) {
+            if (!download_video(db, video_id, *platform, audio_only)) {
                 sqlite3_close(db);
                 return 1;
             }
