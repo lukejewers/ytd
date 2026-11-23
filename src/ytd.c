@@ -2,6 +2,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include "sqlite3.h"
 #define FLAG_IMPLEMENTATION
@@ -9,7 +11,12 @@
 #define NOB_IMPLEMENTATION
 #include "../thirdparty/nob.h"
 
-sqlite3 *open_db()
+typedef struct {
+    char *title;
+    char *uploader_id;
+} VideoMetadata;
+
+sqlite3 *open_db(void)
 {
     sqlite3 *db = NULL;
     const char *db_path = "/me/db/yt.db";
@@ -36,42 +43,40 @@ const char *get_url_for_platform(const char *platform)
     return NULL;
 }
 
-bool get_latest_videos(int argc, char **argv, uint64_t latest, const char *platform)
+bool ytdlp_latest_videos(const char *uploader_id, uint64_t latest, const char *platform)
 {
     if (platform && strcmp(platform, "youtube") != 0) {
         fprintf(stderr, "[ytd] %s is not a valid option for latest videos\n", platform);
         return false;
     }
 
-    argc = flag_rest_argc();
-    argv = flag_rest_argv();
-
-    if (argc != 1) {
-        fprintf(stderr, "[ytd] passed %d args; must only pass 1 arg", argc);
-        return false;
-    }
-
     Cmd cmd = {0};
     Chain chain = {0};
-    if (!chain_begin(&chain)) return false;
+    bool ok = false;
+    if (!chain_begin(&chain)) goto cleanup;
     {
         cmd_append(&cmd, "yt-dlp");
         cmd_append(&cmd, "--playlist-end", temp_sprintf("%" PRIu64, latest));
         cmd_append(&cmd, "--flat-playlist");
         cmd_append(&cmd, "--extractor-args", "youtubetab:approximate_date");
         cmd_append(&cmd, "--ignore-errors");
-        cmd_append(&cmd, "-j", temp_sprintf("https://youtube.com/%s", argv[0]));
-        if (!chain_cmd(&chain, &cmd)) return false;
+        cmd_append(&cmd, "-j", temp_sprintf("https://youtube.com/%s", uploader_id));
+        if (!chain_cmd(&chain, &cmd)) goto cleanup;
 
         cmd_append(&cmd, "jq");
         cmd_append(&cmd, "-r",
                    "select(.url | contains(\"/shorts/\") | not) "
                    "| select((.live_status // \"not_live\") == \"not_live\") "
                    "| \"[\\(.upload_date)] [\\(.id)] \\(.title)\"");
-        if (!chain_cmd(&chain, &cmd)) return false;
+        if (!chain_cmd(&chain, &cmd)) goto cleanup;
     }
-    if (!chain_end(&chain)) return false;
-    return true;
+    if (!chain_end(&chain)) goto cleanup;
+    ok = true;
+
+ cleanup:
+    free(cmd.items);
+    free(chain.cmd.items);
+    return ok;
 }
 
 bool open_video(const char *open, const char *platform)
@@ -83,41 +88,39 @@ bool open_video(const char *open, const char *platform)
         return false;
     }
     cmd_append(&cmd, "firefox", temp_sprintf("%s/%s", url, open));
-    if (!cmd_run(&cmd)) return false;
-    return true;
+    bool ok = cmd_run(&cmd);
+    free(cmd.items);
+    return ok;
 }
 
-bool download_video(sqlite3 *db, const char *video_id, const char *platform, bool audio_only)
+bool video_exists(sqlite3 *db, const char *video_id)
 {
-    sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(db, "select exists(select 1 from video where video_id = ?)", -1, &stmt, 0);
-    if (rc != SQLITE_OK) {
+    bool video_exists = false;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "select exists(select 1 from video where video_id = ?)", -1, &stmt, 0) != SQLITE_OK) {
         fprintf(stderr, "[ytd] can't prepare statement: %s\n", sqlite3_errmsg(db));
-        return false;
+        goto cleanup;
     }
 
-    rc = sqlite3_bind_text(stmt, 1, video_id, -1, NULL);
-    if (rc != SQLITE_OK) {
+    if (sqlite3_bind_text(stmt, 1, video_id, -1, NULL) != SQLITE_OK) {
         fprintf(stderr, "[ytd] can't bind to statement: %s\n", sqlite3_errmsg(db));
-        sqlite3_finalize(stmt);
-        return false;
+        goto cleanup;
     }
 
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_ROW) {
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
         fprintf(stderr, "[ytd] can't read video_id: %s\n", sqlite3_errmsg(db));
-        sqlite3_finalize(stmt);
-        return false;
+        goto cleanup;
     }
 
-    int video_exists = sqlite3_column_int(stmt, 0);
+    video_exists = sqlite3_column_int(stmt, 0);
+
+ cleanup:
     sqlite3_finalize(stmt);
+    return video_exists;
+}
 
-    if (video_exists) {
-        fprintf(stdout, "[ytd] video with id %s already exists. Not downloading video again.\n", video_id);
-        return true;
-    }
-
+bool ytdlp_download(const char *platform, const char *video_id, bool audio_only, VideoMetadata *out)
+{
     const char *url = get_url_for_platform(platform);
     if (!url) {
         fprintf(stderr, "[ytd] platform %s not supported\n", platform);
@@ -126,9 +129,15 @@ bool download_video(sqlite3 *db, const char *video_id, const char *platform, boo
 
     char tmp_filename[] = "/tmp/outputXXXXXX";
     int fd = mkstemp(tmp_filename);
+    if (fd < 0) {
+        perror("[ytd] mkstemp");
+        return false;
+    }
+
     const char delimiter[] = "__delimiter__";
     size_t delimiter_len = strlen(delimiter);
 
+    bool ok = false;
     Cmd cmd = {0};
     cmd_append(&cmd, "yt-dlp");
     if (audio_only) {
@@ -143,7 +152,10 @@ bool download_video(sqlite3 *db, const char *video_id, const char *platform, boo
     cmd_append(&cmd, "-o", "$HOME/Videos/%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s");
     cmd_append(&cmd, temp_sprintf("%s/%s", url, video_id));
     cmd_append(&cmd, "--print-to-file", temp_sprintf("%%(uploader_id)s%s%%(title)s", delimiter), tmp_filename);
-    if (!cmd_run(&cmd)) return false;
+    if (!cmd_run(&cmd)) {
+        fprintf(stderr, "[ytd] yt-dlp failed\n");
+        goto cleanup;
+    }
 
     char str[4096];
     char c;
@@ -152,93 +164,89 @@ bool download_video(sqlite3 *db, const char *video_id, const char *platform, boo
     while (idx < sizeof(str) - 1 && read(fd, &c, 1) > 0) str[idx++] = c;
     str[idx] = '\0';
 
-    char *uploader_id;
-    char *title;
     const char *p = strstr(str, delimiter);
-    if (p) {
-        size_t before = p - str;
-        uploader_id = strndup(str, before);
-        size_t title_len = idx - before - delimiter_len;
-        if (title_len > 0 && str[idx-1] == '\n') title_len--;
-        title = strndup(p + delimiter_len, title_len);
-    } else {
+    if (!p) {
         fprintf(stderr, "[ytd] can't get video metadata\n");
-        close(fd);
-        delete_file(tmp_filename);
-        return false;
+        goto cleanup;
     }
 
+    size_t before = p - str;
+    size_t title_len = idx - before - delimiter_len;
+    if (title_len > 0 && str[idx-1] == '\n') title_len--;
+
+    out->title = strndup(p + delimiter_len, title_len);
+    out->uploader_id = strndup(str, before);
+    if (!out->title || !out->uploader_id) {
+        fprintf(stderr, "[ytd] out of memory\n");
+        goto cleanup;
+    }
+    ok = true;
+
+ cleanup:
     close(fd);
     delete_file(tmp_filename);
+    free(cmd.items);
+    return ok;
+}
 
-    rc = sqlite3_prepare_v2(db, "insert into video (video_id,platform,title,uploader_id,media_type) values (?,?,?,?,?)", -1, &stmt, 0);
-    if (rc != SQLITE_OK) {
+bool download_video(sqlite3 *db, const char *video_id, const char *platform, bool audio_only)
+{
+    if (video_exists(db, video_id)) {
+        fprintf(stdout, "[ytd] video with id %s already exists. Not downloading video again.\n", video_id);
+        return true;
+    }
+
+    sqlite3_stmt *stmt = NULL;
+    const char *insert_into = "insert into video (video_id,platform,title,uploader_id,media_type) values (?,?,?,?,?)";
+    if (sqlite3_prepare_v2(db, insert_into, -1, &stmt, 0) != SQLITE_OK) {
         fprintf(stderr, "[ytd] can't prepare statement: %s\n", sqlite3_errmsg(db));
-        free(uploader_id);
-        free(title);
         return false;
     }
 
-    rc = sqlite3_bind_text(stmt, 1, video_id, -1, NULL);
+    bool ok = false;
+    VideoMetadata metadata = {0};
+    if (!ytdlp_download(platform, video_id, audio_only, &metadata)) goto cleanup;
+
+    int rc = sqlite3_bind_text(stmt, 1, video_id, -1, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 2, platform, -1, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 3, metadata.title, -1, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 4, metadata.uploader_id, -1, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 5, audio_only ? "audio" : "video", -1, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "[ytd] can't bind to statement: %s\n", sqlite3_errmsg(db));
-        free(uploader_id);
-        free(title);
-        sqlite3_finalize(stmt);
-        return false;
+        goto cleanup;
     }
 
-    rc = sqlite3_bind_text(stmt, 2, platform, -1, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "[ytd] can't bind to statement: %s\n", sqlite3_errmsg(db));
-        free(uploader_id);
-        free(title);
-        sqlite3_finalize(stmt);
-        return false;
-    }
-
-    rc = sqlite3_bind_text(stmt, 3, title, -1, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "[ytd] can't bind to statement: %s\n", sqlite3_errmsg(db));
-        free(uploader_id);
-        free(title);
-        sqlite3_finalize(stmt);
-        return false;
-    }
-
-    rc = sqlite3_bind_text(stmt, 4, uploader_id, -1, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "[ytd] can't bind to statement: %s\n", sqlite3_errmsg(db));
-        free(uploader_id);
-        free(title);
-        sqlite3_finalize(stmt);
-        return false;
-    }
-
-    const char *media_type = audio_only ? "audio" : "video";
-    rc = sqlite3_bind_text(stmt, 5, media_type, -1, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "[ytd] can't bind to statement: %s\n", sqlite3_errmsg(db));
-        free(uploader_id);
-        free(title);
-        sqlite3_finalize(stmt);
-        return false;
-    }
-
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_DONE) {
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
         fprintf(stderr, "[ytd] can't insert video_id into video: %s\n", sqlite3_errmsg(db));
-        free(uploader_id);
-        free(title);
-        sqlite3_finalize(stmt);
-        return false;
+        goto cleanup;
     }
+    ok = true;
 
-    free(uploader_id);
-    free(title);
+ cleanup:
+    free(metadata.title);
+    free(metadata.uploader_id);
     sqlite3_finalize(stmt);
+    return ok;
+}
 
-    return true;
+bool get_user_version(sqlite3 *db, int *version)
+{
+    bool ok = false;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[ytd] can't prepare user_version: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        fprintf(stderr, "[ytd] can't read user_version: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+    *version = sqlite3_column_int(stmt, 0);
+    ok = true;
+ cleanup:
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 bool apply_migrations(sqlite3 *db)
@@ -260,46 +268,41 @@ bool apply_migrations(sqlite3 *db)
         "ALTER TABLE video ADD COLUMN media_type TEXT;"
     };
 
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "[ytd] can't prepare user_version: %s\n", sqlite3_errmsg(db));
-        return false;
-    }
+    int current_version;
+    if (!get_user_version(db, &current_version)) return false;
 
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_ROW) {
-        fprintf(stderr, "[ytd] can't read user_version: %s\n", sqlite3_errmsg(db));
-        return false;
-    }
-
-    int current_version = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-
+    bool ok = false;
     for (int i = current_version; i < (int)ARRAY_LEN(migrations); i++) {
-        sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, NULL);
+        if (sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL) != SQLITE_OK) {
+            fprintf(stderr, "[ytd] can't begin transaction: %s\n", sqlite3_errmsg(db));
+            goto out;
+        }
 
-        char *zErrMsg = NULL;
-        rc = sqlite3_exec(db, migrations[i], NULL, 0, &zErrMsg);
-        if (rc != SQLITE_OK) {
-            fprintf(stderr, "[ytd] SQL error when applying migration %04d: %s\n", i + 1, zErrMsg);
-            sqlite3_free(zErrMsg);
-            return false;
+        if (sqlite3_exec(db, migrations[i], NULL, 0, NULL) != SQLITE_OK) {
+            fprintf(stderr, "[ytd] SQL error when applying migration %04d: %s\n", i + 1, sqlite3_errmsg(db));
+            goto rollback;
         }
 
         char *sql = sqlite3_mprintf("PRAGMA user_version = %d", i + 1);
-        rc = sqlite3_exec(db, sql, NULL, 0, &zErrMsg);
+        int rc = sqlite3_exec(db, sql, NULL, 0, NULL);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) {
-            fprintf(stderr, "[ytd] SQL error when setting user_version %d: %s\n", i + 1, zErrMsg);
-            sqlite3_free(zErrMsg);
-            return false;
+            fprintf(stderr, "[ytd] SQL error when setting user_version %04d: %s\n", i + 1, sqlite3_errmsg(db));
+            goto rollback;
         }
 
-        sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+        if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+            fprintf(stderr, "[ytd] can't commit migration %04d: %s\n", i + 1, sqlite3_errmsg(db));
+            goto rollback;
+        }
     }
+    ok = true;
+    goto out;
 
-    return true;
+ rollback:
+    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+ out:
+    return ok;
 }
 
 void usage(FILE *stream)
@@ -323,57 +326,65 @@ int main(int argc, char **argv)
     if (!flag_parse(argc, argv)) {
         usage(stderr);
         flag_print_error(stderr);
-        return 1;
+        return EXIT_FAILURE;
     }
 
     if (*help) {
         usage(stdout);
-        return 0;
+        return EXIT_SUCCESS;
     }
 
     if (!*debug) nob_set_log_handler(&nob_null_log_handler);
 
     sqlite3 *db = open_db();
-    if (!db) return 1;
+    if (!db) return EXIT_FAILURE;
 
+    int status = EXIT_SUCCESS;
     if (!apply_migrations(db)) {
-        sqlite3_close(db);
-        return 1;
+        status = EXIT_FAILURE;
+        goto out;
     }
 
     if (*latest) {
-        if (!get_latest_videos(argc, argv, *latest, *platform)) {
-            sqlite3_close(db);
-            return 1;
+        int rest_argc = flag_rest_argc();
+        char **rest_argv = flag_rest_argv();
+        if (rest_argc != 1) {
+            fprintf(stderr, "[ytd] -l needs exactly 1 uploader id, got %d\n", rest_argc);
+            status = EXIT_FAILURE;
+            goto out;
+        }
+        if (!ytdlp_latest_videos(rest_argv[0], *latest, *platform)) {
+            status = EXIT_FAILURE;
+            goto out;
         }
     } else if (*open) {
         if (!open_video(*open, *platform)) {
-            sqlite3_close(db);
-            return 1;
+            status = EXIT_FAILURE;
+            goto out;
         }
     } else if (*download) {
         bool audio_only = false;
         if (!download_video(db, *download, *platform, audio_only)) {
-            sqlite3_close(db);
-            return 1;
+            status = EXIT_FAILURE;
+            goto out;
         }
     } else if (*audio) {
         bool audio_only = true;
         if (!download_video(db, *audio, *platform, audio_only)) {
-            sqlite3_close(db);
-            return 1;
+            status = EXIT_FAILURE;
+            goto out;
         }
-    } else if (download_list) {
+    } else if (download_list->count > 0) {
         bool audio_only = false;
         for (size_t i = 0; i < download_list->count; i++) {
-            const char *video_id = download_list->items[i];
-            if (!download_video(db, video_id, *platform, audio_only)) {
-                sqlite3_close(db);
-                return 1;
+            if (!download_video(db, download_list->items[i], *platform, audio_only)) {
+                status = EXIT_FAILURE;
+                goto out;
             }
         }
     }
 
+ out:
     sqlite3_close(db);
-    return 0;
+    return status;
 }
