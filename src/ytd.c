@@ -114,7 +114,8 @@ bool download_video(sqlite3 *db, const char *video_id, const char *platform, boo
     sqlite3_finalize(stmt);
 
     if (video_exists) {
-        fprintf(stdout, "[ytd] video with id %s already exists. Downloading video again...\n", video_id);
+        fprintf(stdout, "[ytd] video with id %s already exists. Not downloading video again.\n", video_id);
+        return true;
     }
 
     const char *url = get_url_for_platform(platform);
