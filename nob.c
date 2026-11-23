@@ -1,3 +1,5 @@
+#include <stdbool.h>
+
 #define NOB_IMPLEMENTATION
 #include "thirdparty/nob.h"
 
@@ -9,23 +11,25 @@ int main(int argc, char **argv)
     if (!mkdir_if_not_exists(BUILD_FOLDER)) return 1;
 
     GO_REBUILD_URSELF(argc, argv);
+
+    shift(argv, argc);
+
+    bool asan = false;
+
     Cmd cmd = {0};
     cmd_append(&cmd, "cc");
     cmd_append(&cmd, "-Wall", "-Wextra");
-    cmd_append(&cmd, "-lsqlite3");
+    if (asan) cmd_append(&cmd, "-g", "-fsanitize=address,undefined");
     cmd_append(&cmd, "-o", BUILD_FOLDER"ytd", SRC_FOLDER"ytd.c");
+    cmd_append(&cmd, "-lsqlite3");
 
     if (!cmd_run(&cmd)) return 1;
 
-    shift(argv, argc); // shift program name
-
     if (argc > 0 && strcmp(argv[0], "-run") == 0) {
-        shift(argv, argc); // shift -run flag
+        shift(argv, argc);
         Cmd cmd = {0};
         cmd_append(&cmd, BUILD_FOLDER"ytd");
-        for (int i = 0; i < argc; ++i) {
-            cmd_append(&cmd, argv[i]);
-        }
+        for (int i = 0; i < argc; ++i) cmd_append(&cmd, argv[i]);
         if (!cmd_run(&cmd)) return 1;
     }
 
